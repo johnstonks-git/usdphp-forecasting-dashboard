@@ -3,11 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from scipy.optimize import minimize
-from sklearn.linear_model import LinearRegression
 from sklearn.metrics import (
     mean_absolute_error,
     mean_absolute_percentage_error,
@@ -19,422 +16,423 @@ from sklearn.metrics import (
 BASE_DIR = Path(__file__).parent
 PRED_DIR = BASE_DIR / "predictions"
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="USD-PHP Forecasting Dashboard",
     page_icon="📈",
     layout="wide",
 )
 
+# ═════════════════════════════════════════════════════════════════════════════
+# THESIS DATA  (Tables 7, 9, 12 and section 4.1.1 text)
+# ═════════════════════════════════════════════════════════════════════════════
 HORIZONS = [1, 3, 7, 14, 21, 30]
-ENSEMBLE_HORIZONS = {1, 3, 7}
+H_LABELS = ["1-Day", "3-Day", "7-Day", "14-Day", "21-Day", "30-Day"]
+MODELS   = ["N-BEATSx", "TFT", "Constrained Ensemble", "Naive Baseline"]
 
-# ── Data loaders ──────────────────────────────────────────────────────────────
+METRICS = {
+    "MAE": {
+        "N-BEATSx":            [0.1777, 0.2679, 0.3542, 0.5192, 0.6478, 0.8459],
+        "TFT":                 [0.1681, 0.1651, 0.1752, 1.3390, 1.2313, 1.0709],
+        "Constrained Ensemble":[0.1422, 0.1562, 0.1634, 0.3715, 0.5590, 0.7965],
+        "Naive Baseline":      [0.1565, 0.2546, 0.3834, 0.5265, 0.7119, 0.9463],
+    },
+    "MSE": {
+        "N-BEATSx":            [0.0517, 0.1216, 0.2184, 0.4687, 0.7082, 1.1510],
+        "TFT":                 [0.0443, 0.0397, 0.0452, 2.5037, 2.2974, 1.7512],
+        "Constrained Ensemble":[0.0326, 0.0352, 0.0380, 0.2205, 0.4477, 0.9200],
+        "Naive Baseline":      [0.0431, 0.1156, 0.2671, 0.4688, 0.7471, 1.1507],
+    },
+    "MAPE": {
+        "N-BEATSx":            [0.0031, 0.0047, 0.0062, 0.0091, 0.0113, 0.0147],
+        "TFT":                 [0.0029, 0.0029, 0.0030, 0.0234, 0.0213, 0.0186],
+        "Constrained Ensemble":[0.0025, 0.0026, 0.0027, 0.0065, 0.0097, 0.0139],
+        "Naive Baseline":      [0.0027, 0.0044, 0.0067, 0.0092, 0.0125, 0.0165],
+    },
+    "R²": {
+        "N-BEATSx":            [ 0.9532,  0.8899,  0.8019,  0.5739,  0.3507, -0.0675],
+        "TFT":                 [ 0.9597,  0.9639,  0.9586, -1.3225, -1.2355, -0.7614],
+        "Constrained Ensemble":[ 0.9694,  0.9676,  0.9660,  0.7953,  0.5643, -0.0643],
+        "Naive Baseline":      [ 0.9610,  0.8956,  0.7610,  0.5945,  0.3505, -0.0558],
+    },
+}
 
+ENSEMBLE_WEIGHTS = {
+    1: (0.4013, 0.5987), 3: (0.1880, 0.8120), 7:  (0.1380, 0.8620),
+    14:(0.9577, 0.0423), 21:(1.0000, 0.0000), 30: (0.9382, 0.0618),
+}
+
+NBEATSX_LOFO = {
+    1:  [("Core Inflation", 21.20), ("Gasoline Prices", 20.29),
+         ("Overnight Deposit Rate", 18.89), ("Inflation Rate", 12.40), ("Imports", 5.13)],
+    3:  [("Interest Rate", 40.40), ("Inflation Rate", 24.94),
+         ("Gasoline Prices", 17.46), ("Overnight Deposit Rate", 17.20)],
+    7:  [("Inflation Rate", 42.56), ("Overnight Deposit Rate", 26.44),
+         ("Core Inflation", 22.80), ("Balance of Trade", 18.63), ("Price Group", 9.76)],
+    14: [("Inflation Rate", 33.62), ("Gasoline Prices", 23.01),
+         ("Overnight Deposit Rate", 17.10), ("Price Group", 8.81), ("Balance of Trade", 6.98)],
+    21: [("Gasoline Prices", 33.62), ("Core Inflation", 23.01),
+         ("Cash Remittances", 17.10), ("Overnight Deposit Rate", 8.81), ("Interest Rate", 6.98)],
+    30: [("Balance of Trade", 20.15), ("Cash Remittances", 16.62),
+         ("Inflation Rate", 15.10), ("Exports", 9.81), ("Gasoline Prices", 8.70)],
+}
+
+TFT_ENCODER = {
+    1:  [("Inflation Rate", 34.50), ("Gasoline Prices", 29.91),
+         ("Close", 5.26), ("Exports", 4.90), ("High", 3.80)],
+    3:  [("Interest Rate", 95.20), ("Rel. Time Index", 0.82),
+         ("Core Inflation", 0.55), ("Cash Remittances", 0.37), ("Forex Reserves", 0.33)],
+    7:  [("High", 70.00), ("Interest Rate", 12.07),
+         ("Low", 2.42), ("Rel. Time Index", 2.19), ("Open", 1.91)],
+    14: [("Interest Rate", 97.82), ("Core Inflation", 0.30),
+         ("High", 0.18), ("Overnight Rate", 0.16), ("Gasoline Prices", 0.16)],
+    21: [("Interest Rate", 76.46), ("High", 9.25),
+         ("Overnight Deposit", 1.64), ("Forex Reserves", 1.59), ("Exports", 1.35)],
+    30: [("Cash Remittances", 20.16), ("High", 13.21),
+         ("Balance of Trade", 12.63), ("Low", 11.00), ("Interest Rate", 9.44)],
+}
+
+TFT_DECODER = {
+    1:  [("High", 90.17), ("Low", 1.61), ("Forex Reserves", 1.39),
+         ("Open", 1.12), ("Overnight Rate", 0.93)],
+    3:  [("High", 78.40), ("Low", 3.62), ("Gasoline Prices", 2.68),
+         ("Rel. Time Index", 2.44), ("Open", 2.07)],
+    7:  [("High", 58.58), ("Imports", 6.76), ("Low", 6.01),
+         ("Gasoline Prices", 4.37), ("Overnight Rate", 4.19)],
+    14: [("High", 63.46), ("Low", 6.00), ("Imports", 4.86),
+         ("Gasoline Prices", 3.48), ("Overnight Deposit", 3.41)],
+    21: [("High", 50.53), ("Gasoline Prices", 7.22), ("Inflation Rate", 5.99),
+         ("Low", 5.91), ("Forex Reserves", 5.87)],
+    30: [("High", 50.53), ("Gasoline Prices", 7.22), ("Forex Reserves", 5.87),
+         ("Inflation Rate", 5.99), ("Balance of Trade", 5.00)],
+}
+
+REGIME_TEXT = {
+    1:  "**1-Day:** Both models rely on **cost-push indicators** — Core Inflation and Gasoline Prices. Daily exchange rate fluctuations are highly sensitive to real-time inflationary pressures.",
+    3:  "**3-Day:** A clear shift toward **monetary policy** — the Interest Rate dominates TFT (95.20%) and tops N-BEATSx (40.40%). The cost of borrowing becomes the primary medium-term currency anchor.",
+    7:  "**7-Day:** Models briefly diverge. N-BEATSx deepens reliance on **Inflation Rate (42.56%)** and **Overnight Deposit Rate (26.44%)**. TFT pivots to structural market boundaries — historical High (70.00%).",
+    14: "**14-Day:** TFT overwhelmingly anchors on **Interest Rate (97.82%)**. N-BEATSx maintains a distributed macroeconomic profile: Inflation Rate (33.62%) and Gasoline Prices (23.01%).",
+    21: "**21-Day:** A structural pivot begins — **Cash Remittances** emerge as a top-3 feature in N-BEATSx (17.10%), signaling that international capital inflows carry more weight than short-term domestic volatility.",
+    30: "**30-Day:** A complete **regime shift** to international trade dynamics. Both models independently prioritize **Balance of Trade** and **Cash Remittances** — the true fundamental determinants of monthly USD-PHP movements.",
+}
+
+
+# ── Loaders ───────────────────────────────────────────────────────────────────
 @st.cache_data
-def load_tft(horizon: int) -> pd.DataFrame | None:
+def load_tft(horizon: int):
     path = PRED_DIR / f"tft_{horizon}day.csv"
     if not path.exists():
         return None
-    df = pd.read_csv(path, parse_dates=["Date"])
-    return df.sort_values("Date").reset_index(drop=True)
+    return pd.read_csv(path, parse_dates=["Date"]).sort_values("Date").reset_index(drop=True)
 
 
-@st.cache_data
-def load_nbeatsx_forecasts(horizon: int) -> pd.DataFrame | None:
-    """Per-date NBEATSx predictions (Date, Actual, Predicted)."""
-    path = PRED_DIR / f"nbeatsx_{horizon}day.csv"
-    if not path.exists():
-        return None
-    df = pd.read_csv(path, parse_dates=["Date"])
-    return df.sort_values("Date").reset_index(drop=True)
-
-
-@st.cache_data
-def load_nbeatsx_optuna(horizon: int) -> pd.DataFrame | None:
-    """Optuna trial metrics for NBEATSx (used in Model Comparison when per-date file is absent)."""
-    path = PRED_DIR / f"nbeatsx_optuna_{horizon}day.csv"
-    if not path.exists():
-        return None
-    return pd.read_csv(path)
-
-
-@st.cache_data
-def build_ensemble(horizon: int):
-    tft = load_tft(horizon)
-    nb = load_nbeatsx_forecasts(horizon)
-    if tft is None or nb is None:
-        return None, None
-
-    merged = pd.merge(
-        tft[["Date", "Actual", "Predicted"]].rename(columns={"Predicted": "TFT"}),
-        nb[["Date", "Predicted"]].rename(columns={"Predicted": "NBEATSx"}),
-        on="Date",
-        how="inner",
-    ).reset_index(drop=True)
-
-    X = merged[["NBEATSx", "TFT"]].values
-    y = merged["Actual"].values
-
-    lr = LinearRegression(fit_intercept=True)
-    lr.fit(X, y)
-    w1u, w2u = lr.coef_
-    bu = lr.intercept_
-    merged["Unconstrained"] = lr.predict(X)
-
-    def obj(w):
-        return np.mean((y - w[0] * X[:, 0] - w[1] * X[:, 1]) ** 2)
-
-    res = minimize(
-        obj,
-        [0.5, 0.5],
-        method="SLSQP",
-        bounds=((0, 1), (0, 1)),
-        constraints={"type": "eq", "fun": lambda w: w[0] + w[1] - 1},
+# ── Chart builders ────────────────────────────────────────────────────────────
+def heatmap_fig(metric: str, low_is_good: bool = True) -> go.Figure:
+    data  = METRICS[metric]
+    z     = [data[m] for m in MODELS]
+    text  = [[f"{v:.4f}" for v in row] for row in z]
+    scale = "RdYlGn_r" if low_is_good else "RdYlGn"
+    fig   = go.Figure(go.Heatmap(
+        z=z, x=H_LABELS, y=MODELS,
+        colorscale=scale,
+        text=text, texttemplate="%{text}",
+        textfont={"size": 12, "color": "black"},
+        hovertemplate="<b>%{y}</b><br>%{x}: %{text}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=f"{metric} Heatmap — Models × Horizons",
+        height=300, margin=dict(l=0, r=0, t=45, b=0),
+        xaxis_title="Forecast Horizon",
     )
-    w1c, w2c = res.x
-    merged["Constrained"] = w1c * X[:, 0] + w2c * X[:, 1]
-
-    weights = {"unconstrained": (w1u, w2u, bu), "constrained": (w1c, w2c)}
-    return merged, weights
+    return fig
 
 
-# ── Metrics ───────────────────────────────────────────────────────────────────
-
-def compute_metrics(actual: np.ndarray, predicted: np.ndarray) -> dict:
-    mae = float(mean_absolute_error(actual, predicted))
-    rmse = float(np.sqrt(mean_squared_error(actual, predicted)))
-    mape = float(mean_absolute_percentage_error(actual, predicted) * 100)
-    r2 = float(r2_score(actual, predicted))
-    da = float(np.mean((np.diff(actual) > 0) == (np.diff(predicted) > 0)) * 100)
-    return {"MAE": mae, "RMSE": rmse, "MAPE (%)": mape, "R²": r2, "DA (%)": da}
-
-
-def get_model_series(model_name, tft_df, nb_df, ens_df):
-    """Return (dates, actual, predicted) arrays for the selected model."""
-    if model_name == "TFT":
-        return tft_df["Date"].values, tft_df["Actual"].values, tft_df["Predicted"].values
-    if model_name == "N-BEATSx":
-        return nb_df["Date"].values, nb_df["Actual"].values, nb_df["Predicted"].values
-    if model_name == "Unconstrained Ensemble":
-        return ens_df["Date"].values, ens_df["Actual"].values, ens_df["Unconstrained"].values
-    if model_name == "Constrained Ensemble":
-        return ens_df["Date"].values, ens_df["Actual"].values, ens_df["Constrained"].values
-
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-
-st.title("📈 USD-PHP Exchange Rate Forecasting Dashboard")
-st.caption("N-BEATSx  ·  Temporal Fusion Transformer  ·  Ensemble — Multi-Horizon Performance Demo")
-
-with st.sidebar:
-    st.header("Controls")
-    horizon = st.selectbox("Forecast Horizon (days)", HORIZONS)
-
-    tft_df = load_tft(horizon)
-    nb_df = load_nbeatsx_forecasts(horizon) if horizon in ENSEMBLE_HORIZONS else None
-    ens_df, ens_weights = (
-        build_ensemble(horizon) if horizon in ENSEMBLE_HORIZONS else (None, None)
+def bar_fig(items: list, title: str, color: str) -> go.Figure:
+    rev      = list(reversed(items))
+    features = [i[0] for i in rev]
+    values   = [i[1] for i in rev]
+    fig = go.Figure(go.Bar(
+        x=values, y=features, orientation="h",
+        marker_color=color,
+        text=[f"{v:.2f}%" for v in values],
+        textposition="outside",
+    ))
+    fig.update_layout(
+        title=title, height=280,
+        margin=dict(l=0, r=70, t=45, b=0),
+        xaxis=dict(title="Importance (%)", range=[0, max(values) * 1.3]),
     )
+    return fig
 
-    available_models: list[str] = []
-    if tft_df is not None:
-        available_models.append("TFT")
-    if nb_df is not None:
-        available_models += ["N-BEATSx", "Unconstrained Ensemble", "Constrained Ensemble"]
 
-    if not available_models:
-        st.error(f"No prediction files found for {horizon}-day horizon.")
-        st.stop()
-
-    model = st.selectbox("Model", available_models)
-
-    st.divider()
-    st.markdown("**Prediction file status:**")
-    for h in HORIZONS:
-        ok = (PRED_DIR / f"tft_{h}day.csv").exists()
-        st.caption(f"{'✅' if ok else '❌'} TFT {h}-day")
-    for h in [1, 3, 7]:
-        ok = (PRED_DIR / f"nbeatsx_{h}day.csv").exists()
-        st.caption(f"{'✅' if ok else '⏳'} N-BEATSx {h}-day{'  ← pending' if not ok else ''}")
-
-if tft_df is None:
-    st.error(
-        f"**Missing:** `predictions/tft_{horizon}day.csv`\n\n"
-        "Place the TFT prediction CSV in `dashboard/predictions/` and refresh."
-    )
-    st.stop()
-
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(
-    ["📊 Interactive Performance", "🏆 Model Comparison", "▶ Animated Simulation"]
+# ═════════════════════════════════════════════════════════════════════════════
+# SIDEBAR NAVIGATION
+# ═════════════════════════════════════════════════════════════════════════════
+st.sidebar.title("USD-PHP Forecasting")
+st.sidebar.caption("Thesis Defense Dashboard")
+st.sidebar.divider()
+page = st.sidebar.radio(
+    "Navigate to",
+    ["📊  Page 1 — Error Metrics",
+     "🔍  Page 2 — Feature Importance",
+     "📈  Page 3 — Line Plots"],
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 1 — Interactive Performance
+# PAGE 1 — 4.1.1  Error Metrics
 # ═════════════════════════════════════════════════════════════════════════════
-with tab1:
-    dates, actual, predicted = get_model_series(model, tft_df, nb_df, ens_df)
-    metrics = compute_metrics(actual, predicted)
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("MAE", f"{metrics['MAE']:.4f}")
-    c2.metric("RMSE", f"{metrics['RMSE']:.4f}")
-    c3.metric("MAPE", f"{metrics['MAPE (%)']:.2f}%")
-    c4.metric("R²", f"{metrics['R²']:.4f}")
-    c5.metric("Dir. Accuracy", f"{metrics['DA (%)']:.1f}%")
-
+if page == "📊  Page 1 — Error Metrics":
+    st.title("4.1.1 Comparative Analysis of Standard Error Metrics")
+    st.markdown(
+        "MAE, MSE, MAPE, and R² heatmaps across all six forecasting horizons. "
+        "**Green = better · Red = worse.**"
+    )
     st.divider()
 
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(x=dates, y=actual, name="Actual", line=dict(color="#1f77b4", width=2))
+    st.subheader("Mean Absolute Error (MAE)")
+    st.plotly_chart(heatmap_fig("MAE", low_is_good=True), use_container_width=True)
+    st.caption(
+        "The Constrained Ensemble maintains the lowest absolute error at every horizon "
+        "(0.1422 at 1-day to 0.7965 at 30-day). TFT suffers a catastrophic spike at 14 days (1.3390)."
     )
-    fig.add_trace(
-        go.Scatter(
-            x=dates,
-            y=predicted,
-            name=f"{model} Predicted",
-            line=dict(color="#ff7f0e", width=2, dash="dash"),
-        )
-    )
-    fig.update_layout(
-        title=f"{model} — {horizon}-Day Horizon: Actual vs. Predicted",
-        xaxis_title="Date",
-        yaxis_title="USD-PHP (Close)",
-        hovermode="x unified",
-        legend=dict(orientation="h", y=1.02),
-        height=500,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    st.divider()
 
-    if model == "Unconstrained Ensemble" and ens_weights:
-        w1, w2, b = ens_weights["unconstrained"]
-        st.caption(f"Formula: ŷ = {w1:.4f}·N-BEATSx + {w2:.4f}·TFT + {b:.4f}")
-    elif model == "Constrained Ensemble" and ens_weights:
-        w1, w2 = ens_weights["constrained"]
-        st.caption(f"Formula: ŷ = {w1:.4f}·N-BEATSx + {w2:.4f}·TFT  (weights sum = 1)")
+    st.subheader("Mean Squared Error (MSE)")
+    st.plotly_chart(heatmap_fig("MSE", low_is_good=True), use_container_width=True)
+    st.caption(
+        "MSE penalizes large deviations heavily. TFT peaks at 2.5037 at the 14-day horizon. "
+        "The Ensemble maintains a controlled 0.2205 at 14 days and 0.4477 at 21 days."
+    )
+    st.divider()
+
+    st.subheader("Mean Absolute Percentage Error (MAPE)")
+    st.plotly_chart(heatmap_fig("MAPE", low_is_good=True), use_container_width=True)
+    st.caption(
+        "The Ensemble keeps relative error remarkably low (0.0097) even at 21 days. "
+        "TFT jumps sharply to 0.0234 at 14 days."
+    )
+    st.divider()
+
+    st.subheader("R² Score")
+    st.plotly_chart(heatmap_fig("R²", low_is_good=False), use_container_width=True)
+    st.caption(
+        "TFT's R² plunges to −1.3225 at 14 days — worse than the historical mean. "
+        "The Ensemble preserves strong explanatory power to 14 days (0.7953) and 21 days (0.5643). "
+        "By 30 days every model records a negative R²."
+    )
+    st.divider()
+
+    st.subheader("Constrained Ensemble Weight Allocations")
+    ew_df = pd.DataFrame(
+        [(f"{h}-Day", w[0], w[1]) for h, w in ENSEMBLE_WEIGHTS.items()],
+        columns=["Horizon", "N-BEATSx", "TFT"],
+    )
+    fig_ew = go.Figure()
+    fig_ew.add_bar(x=ew_df["Horizon"], y=ew_df["TFT"],       name="TFT",      marker_color="#1f77b4")
+    fig_ew.add_bar(x=ew_df["Horizon"], y=ew_df["N-BEATSx"],  name="N-BEATSx", marker_color="#ff7f0e")
+    fig_ew.update_layout(
+        barmode="stack",
+        title="Ensemble Weight Distribution per Horizon",
+        xaxis_title="Horizon", yaxis_title="Allocated Weight",
+        legend=dict(orientation="h", y=1.1), height=340,
+    )
+    st.plotly_chart(fig_ew, use_container_width=True)
+    st.caption(
+        "TFT dominates at short horizons (59.87% at 1-day, 86.20% at 7-day). "
+        "N-BEATSx takes complete control at extended horizons (95.77% at 14-day, 100% at 21-day)."
+    )
+
+    with st.expander("Full Metrics Table"):
+        for metric in ["MAE", "MSE", "MAPE", "R²"]:
+            st.markdown(f"**{metric}**")
+            df_m = pd.DataFrame(METRICS[metric], index=H_LABELS).T
+            st.dataframe(df_m.style.format("{:.4f}"), use_container_width=True)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Model Comparison
+# PAGE 2 — 4.1.2  Feature Importance
 # ═════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.subheader(f"Model Comparison — {horizon}-Day Horizon")
+elif page == "🔍  Page 2 — Feature Importance":
+    st.title("4.1.2 Comparative Analysis of Feature Importance")
+    st.markdown(
+        "N-BEATSx **LOFO** ablation scores vs. TFT **Variable Selection Network** (VSN) weights. "
+        "Slide across horizons to trace how each model shifts its economic reasoning."
+    )
+    st.divider()
 
-    rows = []
+    horizon = st.select_slider(
+        "Forecast Horizon",
+        options=HORIZONS,
+        format_func=lambda x: f"{x}-Day",
+    )
+    st.divider()
 
-    if tft_df is not None:
-        rows.append(
-            {
-                "Model": "TFT",
-                **compute_metrics(tft_df["Actual"].values, tft_df["Predicted"].values),
-            }
+    col_nb, col_tft = st.columns(2)
+
+    with col_nb:
+        st.subheader("N-BEATSx — LOFO Importance")
+        st.plotly_chart(
+            bar_fig(NBEATSX_LOFO[horizon], f"Top Features · {horizon}-Day", "#ff7f0e"),
+            use_container_width=True,
         )
 
-    if nb_df is not None:
-        rows.append(
-            {
-                "Model": "N-BEATSx",
-                **compute_metrics(nb_df["Actual"].values, nb_df["Predicted"].values),
-            }
-        )
-    elif horizon in ENSEMBLE_HORIZONS:
-        # Use best Optuna trial as proxy for N-BEATSx performance
-        optuna_df = load_nbeatsx_optuna(horizon)
-        if optuna_df is not None:
-            best = optuna_df.sort_values("Test_MAE").iloc[0]
-            rows.append(
-                {
-                    "Model": "N-BEATSx (best trial)*",
-                    "MAE": best["Test_MAE"],
-                    "RMSE": float(np.sqrt(best["Test_MSE"])),
-                    "MAPE (%)": best["Test_MAPE"] * 100,
-                    "R²": best["Test_R2"],
-                    "DA (%)": best["Test_DA"],
-                }
+    with col_tft:
+        st.subheader("TFT — Variable Selection Network")
+        enc_tab, dec_tab = st.tabs(["Encoder (Historical)", "Decoder (Future Known)"])
+        with enc_tab:
+            st.plotly_chart(
+                bar_fig(TFT_ENCODER[horizon], f"Encoder VSN · {horizon}-Day", "#1f77b4"),
+                use_container_width=True,
+            )
+        with dec_tab:
+            st.plotly_chart(
+                bar_fig(TFT_DECODER[horizon], f"Decoder VSN · {horizon}-Day", "#2ca02c"),
+                use_container_width=True,
             )
 
-    if ens_df is not None:
-        rows.append(
-            {
-                "Model": "Unconstrained Ensemble",
-                **compute_metrics(ens_df["Actual"].values, ens_df["Unconstrained"].values),
-            }
+    st.divider()
+    st.info(REGIME_TEXT[horizon])
+
+    with st.expander("Top Feature per Horizon — Summary"):
+        st.markdown("**N-BEATSx — #1 Feature**")
+        st.dataframe(
+            pd.DataFrame(
+                [(f"{h}-Day", NBEATSX_LOFO[h][0][0], f"{NBEATSX_LOFO[h][0][1]:.2f}%")
+                 for h in HORIZONS],
+                columns=["Horizon", "Top Feature", "Importance"],
+            ),
+            hide_index=True, use_container_width=True,
         )
-        rows.append(
-            {
-                "Model": "Constrained Ensemble",
-                **compute_metrics(ens_df["Actual"].values, ens_df["Constrained"].values),
-            }
+        st.markdown("**TFT Encoder — #1 Feature**")
+        st.dataframe(
+            pd.DataFrame(
+                [(f"{h}-Day", TFT_ENCODER[h][0][0], f"{TFT_ENCODER[h][0][1]:.2f}%")
+                 for h in HORIZONS],
+                columns=["Horizon", "Top Feature", "Weight"],
+            ),
+            hide_index=True, use_container_width=True,
         )
 
-    if not rows:
-        st.info("No model data available for this horizon yet.")
-    else:
-        comp_df = pd.DataFrame(rows)
-        st.dataframe(comp_df.set_index("Model").style.format("{:.4f}"), use_container_width=True)
-
-        if any("best trial" in r["Model"] for r in rows):
-            st.caption(
-                "\\* N-BEATSx metrics shown from best Optuna trial. "
-                "Add `nbeatsx_Xday.csv` to predictions/ for per-date forecast comparison."
-            )
-
-        st.divider()
-        metric_choice = st.radio(
-            "Metric to visualize",
-            ["MAE", "RMSE", "MAPE (%)", "R²", "DA (%)"],
-            horizontal=True,
-            key="tab2_metric",
-        )
-        fig2 = px.bar(
-            comp_df,
-            x="Model",
-            y=metric_choice,
-            color="Model",
-            text_auto=".4f",
-            title=f"{metric_choice} — {horizon}-Day Horizon",
-            color_discrete_sequence=px.colors.qualitative.Set2,
-        )
-        fig2.update_layout(showlegend=False, height=420)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    if horizon not in ENSEMBLE_HORIZONS:
-        st.info("N-BEATSx and Ensemble models are only available for 1, 3, and 7-day horizons.")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# TAB 3 — Animated Simulation
+# PAGE 3 — Line Plots
 # ═════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.subheader(f"Animated Simulation — {model} ({horizon}-Day Horizon)")
-    st.caption("Step through the test period to see how the model performed day-by-day.")
+elif page == "📈  Page 3 — Line Plots":
+    st.title("Actual vs. Predicted — Line Plots")
+    st.markdown("Inspect the full forecast trajectory or step through the simulation day-by-day.")
 
-    dates_sim, actual_sim, predicted_sim = get_model_series(model, tft_df, nb_df, ens_df)
-    n = len(dates_sim)
-    min_window = min(30, n)
+    col_h, col_m = st.columns(2)
+    with col_h:
+        h_choice = st.selectbox("Forecast Horizon", HORIZONS, format_func=lambda x: f"{x}-Day")
+    with col_m:
+        st.selectbox("Model", ["TFT"])
 
-    if "sim_idx" not in st.session_state:
-        st.session_state.sim_idx = min_window
-    if "playing" not in st.session_state:
-        st.session_state.playing = False
-    if "sim_model_key" not in st.session_state:
-        st.session_state.sim_model_key = (model, horizon)
+    df = load_tft(h_choice)
+    if df is None:
+        st.error(f"Missing `predictions/tft_{h_choice}day.csv`.")
+        st.stop()
 
-    # Reset playhead when model/horizon changes
-    if st.session_state.sim_model_key != (model, horizon):
-        st.session_state.sim_idx = min_window
-        st.session_state.playing = False
-        st.session_state.sim_model_key = (model, horizon)
+    dates     = df["Date"].values
+    actual    = df["Actual"].values
+    predicted = df["Predicted"].values
+    n         = len(dates)
 
-    ctrl_l, ctrl_r = st.columns([1, 3])
-    with ctrl_l:
-        play_label = "⏸ Pause" if st.session_state.playing else "▶ Play"
-        if st.button(play_label, key="play_btn"):
-            st.session_state.playing = not st.session_state.playing
-        if st.button("⏮ Reset", key="reset_btn"):
+    mae  = float(mean_absolute_error(actual, predicted))
+    rmse = float(np.sqrt(mean_squared_error(actual, predicted)))
+    mape = float(mean_absolute_percentage_error(actual, predicted) * 100)
+    r2   = float(r2_score(actual, predicted))
+    da   = float(np.mean((np.diff(actual) > 0) == (np.diff(predicted) > 0)) * 100)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("MAE",           f"{mae:.4f}")
+    c2.metric("RMSE",          f"{rmse:.4f}")
+    c3.metric("MAPE",          f"{mape:.2f}%")
+    c4.metric("R²",       f"{r2:.4f}")
+    c5.metric("Dir. Accuracy", f"{da:.1f}%")
+    st.divider()
+
+    tab_full, tab_sim = st.tabs(["📊 Full Chart", "▶ Animated Simulation"])
+
+    with tab_full:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=dates, y=actual,    name="Actual",
+                                 line=dict(color="#1f77b4", width=2)))
+        fig.add_trace(go.Scatter(x=dates, y=predicted, name="TFT Predicted",
+                                 line=dict(color="#ff7f0e", width=2, dash="dash")))
+        fig.update_layout(
+            title=f"TFT — {h_choice}-Day Horizon: Actual vs. Predicted",
+            xaxis_title="Date", yaxis_title="USD-PHP (Close)",
+            hovermode="x unified", legend=dict(orientation="h", y=1.02), height=520,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab_sim:
+        min_window = min(30, n)
+
+        if "sim_idx" not in st.session_state:
+            st.session_state.sim_idx = min_window
+        if "playing" not in st.session_state:
+            st.session_state.playing = False
+        if "sim_key" not in st.session_state:
+            st.session_state.sim_key = h_choice
+        if st.session_state.sim_key != h_choice:
             st.session_state.sim_idx = min_window
             st.session_state.playing = False
-    with ctrl_r:
-        speed = st.slider("Speed (steps/sec)", 1, 20, 5, key="speed_slider")
+            st.session_state.sim_key = h_choice
 
-    frame_idx = st.slider(
-        "Date index",
-        min_value=min_window,
-        max_value=n,
-        value=st.session_state.sim_idx,
-        key="sim_frame_slider",
-    )
-    st.session_state.sim_idx = frame_idx
+        ctrl_l, ctrl_r = st.columns([1, 3])
+        with ctrl_l:
+            if st.button("⏸ Pause" if st.session_state.playing else "▶ Play"):
+                st.session_state.playing = not st.session_state.playing
+            if st.button("⏮ Reset"):
+                st.session_state.sim_idx = min_window
+                st.session_state.playing = False
+        with ctrl_r:
+            speed = st.slider("Speed (steps/sec)", 1, 20, 5)
 
-    def make_sim_frame(end: int) -> go.Figure:
+        frame = st.slider("Step", min_value=min_window, max_value=n,
+                          value=st.session_state.sim_idx)
+        st.session_state.sim_idx = frame
+        end = frame
+
+        run_mae = float(mean_absolute_error(actual[:end], predicted[:end]))
+        run_r2  = float(r2_score(actual[:end], predicted[:end]))
+
         fig3 = go.Figure()
-        # Faded full actual
-        fig3.add_trace(
-            go.Scatter(
-                x=dates_sim,
-                y=actual_sim,
-                name="Full Actual (preview)",
-                line=dict(color="rgba(31,119,180,0.15)", width=1),
-                hoverinfo="skip",
-            )
-        )
-        # Revealed actual
-        fig3.add_trace(
-            go.Scatter(
-                x=dates_sim[:end],
-                y=actual_sim[:end],
-                name="Actual",
-                line=dict(color="#1f77b4", width=2),
-            )
-        )
-        # Predictions revealed so far
-        fig3.add_trace(
-            go.Scatter(
-                x=dates_sim[:end],
-                y=predicted_sim[:end],
-                name=f"{model}",
-                line=dict(color="#ff7f0e", width=2, dash="dash"),
-            )
-        )
-        # Current point marker
-        fig3.add_trace(
-            go.Scatter(
-                x=[dates_sim[end - 1]],
-                y=[actual_sim[end - 1]],
-                mode="markers",
-                marker=dict(size=10, color="#1f77b4", symbol="circle"),
-                showlegend=False,
-                hoverinfo="skip",
-            )
-        )
-        # Running metrics annotation
-        run_m = compute_metrics(actual_sim[:end], predicted_sim[:end])
-        note = (
-            f"MAE: {run_m['MAE']:.4f}  |  RMSE: {run_m['RMSE']:.4f}<br>"
-            f"MAPE: {run_m['MAPE (%)']:.2f}%  |  R²: {run_m['R²']:.4f}  |  DA: {run_m['DA (%)']:.1f}%"
-        )
+        fig3.add_trace(go.Scatter(x=dates, y=actual, name="Full Actual (preview)",
+                                  line=dict(color="rgba(31,119,180,0.15)", width=1),
+                                  hoverinfo="skip"))
+        fig3.add_trace(go.Scatter(x=dates[:end], y=actual[:end],    name="Actual",
+                                  line=dict(color="#1f77b4", width=2)))
+        fig3.add_trace(go.Scatter(x=dates[:end], y=predicted[:end], name="TFT Predicted",
+                                  line=dict(color="#ff7f0e", width=2, dash="dash")))
+        fig3.add_trace(go.Scatter(x=[dates[end - 1]], y=[actual[end - 1]],
+                                  mode="markers", marker=dict(size=10, color="#1f77b4"),
+                                  showlegend=False, hoverinfo="skip"))
         fig3.add_annotation(
-            xref="paper",
-            yref="paper",
-            x=0.01,
-            y=0.99,
-            text=note,
-            showarrow=False,
-            align="left",
-            bgcolor="rgba(255,255,255,0.9)",
-            bordercolor="lightgray",
-            borderwidth=1,
-            font=dict(size=11, family="monospace"),
+            xref="paper", yref="paper", x=0.01, y=0.99,
+            text=f"MAE: {run_mae:.4f}  |  R²: {run_r2:.4f}",
+            showarrow=False, align="left",
+            bgcolor="rgba(255,255,255,0.9)", bordercolor="lightgray",
+            borderwidth=1, font=dict(size=11, family="monospace"),
         )
-        cur_date = pd.Timestamp(dates_sim[end - 1]).strftime("%Y-%m-%d")
+        cur_date = pd.Timestamp(dates[end - 1]).strftime("%Y-%m-%d")
         fig3.update_layout(
             title=f"Day {end} / {n}  ·  {cur_date}",
-            xaxis_title="Date",
-            yaxis_title="USD-PHP (Close)",
-            hovermode="x unified",
-            legend=dict(orientation="h", y=1.02),
-            height=500,
+            xaxis_title="Date", yaxis_title="USD-PHP (Close)",
+            hovermode="x unified", legend=dict(orientation="h", y=1.02), height=500,
         )
-        return fig3
+        st.plotly_chart(fig3, use_container_width=True)
 
-    chart_ph = st.empty()
-    chart_ph.plotly_chart(make_sim_frame(st.session_state.sim_idx), use_container_width=True)
+        a1, a2 = st.columns(2)
+        a1.metric("Actual",        f"{actual[end - 1]:.4f}")
+        a2.metric("TFT Prediction", f"{predicted[end - 1]:.4f}",
+                  delta=f"{predicted[end - 1] - actual[end - 1]:+.4f}")
 
-    cur = st.session_state.sim_idx - 1
-    m1, m2 = st.columns(2)
-    m1.metric("Actual (current day)", f"{actual_sim[cur]:.4f}")
-    m2.metric(
-        f"{model} Prediction",
-        f"{predicted_sim[cur]:.4f}",
-        delta=f"{predicted_sim[cur] - actual_sim[cur]:+.4f}",
-    )
-
-    # Auto-advance when playing
-    if st.session_state.playing:
-        if st.session_state.sim_idx < n:
-            time.sleep(1.0 / speed)
-            st.session_state.sim_idx = min(st.session_state.sim_idx + 1, n)
-            st.rerun()
-        else:
-            st.session_state.playing = False
-            st.rerun()
+        if st.session_state.playing:
+            if st.session_state.sim_idx < n:
+                time.sleep(1.0 / speed)
+                st.session_state.sim_idx = min(st.session_state.sim_idx + 1, n)
+                st.rerun()
+            else:
+                st.session_state.playing = False
+                st.rerun()
